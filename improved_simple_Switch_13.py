@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+from copy import deepcopy
 from webob import Response
 from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from ryu.base import app_manager
@@ -204,8 +205,8 @@ class VoIP_Capstone4(app_manager.RyuApp):
             ofproto = self.dpid_to_datapath[dpid].ofproto
             all_ports_set = set(dpid_ports[dpid].keys())
             all_internal_ports_set =  set()
-            if dpid in topo_dict.keys():
-                all_internal_ports_set = set(topo_dict[dpid].keys())
+            if dpid in link_dict.keys():
+                all_internal_ports_set = set(link_dict[dpid].keys())
             all_edge_ports = list(all_ports_set - all_internal_ports_set)
             if in_dpid == dpid:
                 all_edge_ports.remove(in_port)
@@ -248,8 +249,51 @@ class VoIP_Capstone4(app_manager.RyuApp):
         return None
 
     def install_topo_flows(self, source, goal, pkt, bidirectional=True):
-        print (self.dijkstras(source, goal, topo_graph))
-            
+        dijkstra_tup = (self.dijkstras(source, goal, topo_graph))
+        least_latency_path = dijkstra_tup[-1]
+        reverse_latency_path = deepcopy(least_latency_path)
+        reverse_latency_path.reverse()
+        eth = pkt.get_protocols(ethernet.ethernet)[0]
+        if eth.ethertype == ether.ETH_TYPE_IP:
+            ip_pkt = pkt.get_protocol(ipv4.ipv4)
+            sip = ip_pkt.src
+            dip = ip_pkt.dst
+            for path_list, src_ip, dst_ip in zip([least_latency_path,reverse_latency_path],[sip,dip],[dip,sip]): 
+                for ind,switch in enumerate(path_list[:-1]):
+                    for local_port in topo_dict[switch].keys():
+                        if "REMOTE_DPID" in topo_dict[switch][local_port].keys():
+                            if topo_dict[switch][local_port]["REMOTE_DPID"] == path_list[ind+1]:
+                                out_port = local_port
+                                datapath = self.dpid_to_datapath[switch]
+                                ofproto = datapath.ofproto
+                                parser = datapath.ofproto_parser
+                                match = parser.OFPMatch(eth_type=2048 ,ipv4_dst=dst_ip, ipv4_src=src_ip)
+                                actions = [parser.OFPActionOutput(out_port)]
+                                self.add_flow(datapath, 10000, match, actions)
+                                break
+                else:
+                    switch = path_list[-1]
+                    for local_port in topo_dict[switch].keys():
+                        if "DEVICE" in topo_dict[switch][local_port].keys():
+                            if topo_dict[switch][local_port]["DEVICE"]["IP"] == dst_ip:
+                                out_port = local_port
+                                datapath = self.dpid_to_datapath[switch]
+                                ofproto = datapath.ofproto
+                                parser = datapath.ofproto_parser
+                                match = parser.OFPMatch(eth_type=2048 ,ipv4_dst=dst_ip, ipv4_src=src_ip)
+                                actions = [parser.OFPActionOutput(out_port)]
+                                self.add_flow(datapath, 10000, match, actions)
+                if not bidirectional:
+                    break
+        return
+
+    def remove_stale_topo_info(self, dpid, sip, src, in_port):
+        for switch in topo_dict.keys():
+            for local_port in topo_dict[switch].keys():
+                if "DEVICE" in topo_dict[switch][local_port].keys():
+                    if sip == topo_dict[switch][local_port]["DEVICE"]["IP"] and topo_dict[switch][local_port]["DEVICE"]["TYPE"] != "Phone":
+                        del topo_dict[switch][local_port]
+                        return            
     
     @set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
     def port_desc_handler(self, ev):
@@ -424,11 +468,17 @@ class VoIP_Capstone4(app_manager.RyuApp):
 
         elif eth.ethertype == ether.ETH_TYPE_IP:
             ip_pkt = pkt.get_protocol(ipv4.ipv4)
-            icmp_pkt = pkt.get_protocol(icmp.icmp)
             sip = ip_pkt.src
             dip = ip_pkt.dst
             iphdr = pkt.get_protocols(ipv4.ipv4)[0]
+            if sip != self.vip:
+                self.remove_stale_topo_info(dpid, sip, src, in_port)
+                topo_dict.setdefault(dpid, {})
+                topo_dict[dpid].setdefault(in_port, {})
+                topo_dict[dpid][in_port].setdefault("DEVICE", {})
+                topo_dict[dpid][in_port]["DEVICE"] = {"IP": sip, "MAC": src, "TYPE": "unknown"}
             if iphdr.proto == inet.IPPROTO_ICMP and dip == self.vip:
+                icmp_pkt = pkt.get_protocol(icmp.icmp)
                 print "Got ICMP for the SIP server"
                 self.logger.info("Src IP: {}, Dst IP: {}".format(sip, dip))
                 pakt = packet.Packet()
