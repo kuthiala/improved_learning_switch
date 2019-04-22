@@ -119,6 +119,8 @@ class VoIP_Capstone4(app_manager.RyuApp):
         self.vmac = '00:00:00:10:01:11'
         self.topo_timer = 3
         self.switch_interconnection_ports = {}
+        self.idle_timeout = 5
+        self.hard_timeout = 5
         wsgi = kwargs['wsgi']
         wsgi.register(SimpleSwitchController,
                       {simple_switch_instance_name: self})
@@ -152,7 +154,7 @@ class VoIP_Capstone4(app_manager.RyuApp):
                 del topo_dict[dpid]
                 del topo_graph[dpid]
 
-    def add_flow(self, datapath, priority, match, actions, command=0, buffer_id=None, out_port=0, out_group=0):
+    def add_flow(self, datapath, priority, match, actions, command=0, buffer_id=None, idle_timeout=0, hard_timeout=0, out_port=0, out_group=0, do_not_display=False):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
@@ -163,6 +165,8 @@ class VoIP_Capstone4(app_manager.RyuApp):
                                     buffer_id=buffer_id,
                                     priority=priority,
                                     command=command,
+                                    idle_timeout=idle_timeout,
+                                    hard_timeout=hard_timeout,
                                     out_port=out_port,
                                     out_group=out_group,
                                     match=match,
@@ -171,11 +175,14 @@ class VoIP_Capstone4(app_manager.RyuApp):
             mod = parser.OFPFlowMod(datapath=datapath,
                                     priority=priority,
                                     command=command,
+                                    idle_timeout=idle_timeout,
+                                    hard_timeout=hard_timeout,
                                     out_port=out_port,
                                     out_group=out_group,
                                     match=match,
                                     instructions=inst)
-        self.logger.info("Adding flow on {} -> Match {} Actions: {}".format(datapath.id, match.items.im_self, actions))
+        if not do_not_display:
+            self.logger.info("Adding flow on {} -> Match {} Actions: {}".format(datapath.id, match.items.im_self, actions))
         datapath.send_msg(mod)
 
     def pretty_print(self, dictionary):
@@ -267,9 +274,9 @@ class VoIP_Capstone4(app_manager.RyuApp):
                                 datapath = self.dpid_to_datapath[switch]
                                 ofproto = datapath.ofproto
                                 parser = datapath.ofproto_parser
-                                match = parser.OFPMatch(eth_type=2048 ,ipv4_dst=dst_ip, ipv4_src=src_ip)
+                                match = parser.OFPMatch(eth_type=2048 ,ip_proto=ip_pkt.proto ,ipv4_dst=dst_ip, ipv4_src=src_ip)
                                 actions = [parser.OFPActionOutput(out_port)]
-                                self.add_flow(datapath, 10000, match, actions)
+                                self.add_flow(datapath, 10000, match, actions, idle_timeout=self.idle_timeout)
                                 break
                 else:
                     switch = path_list[-1]
@@ -280,9 +287,9 @@ class VoIP_Capstone4(app_manager.RyuApp):
                                 datapath = self.dpid_to_datapath[switch]
                                 ofproto = datapath.ofproto
                                 parser = datapath.ofproto_parser
-                                match = parser.OFPMatch(eth_type=2048 ,ipv4_dst=dst_ip, ipv4_src=src_ip)
+                                match = parser.OFPMatch(eth_type=2048 ,ip_proto=ip_pkt.proto ,ipv4_dst=dst_ip, ipv4_src=src_ip)
                                 actions = [parser.OFPActionOutput(out_port)]
-                                self.add_flow(datapath, 10000, match, actions)
+                                self.add_flow(datapath, 10000, match, actions, idle_timeout=self.idle_timeout)
                 if not bidirectional:
                     break
         return
@@ -507,6 +514,8 @@ class VoIP_Capstone4(app_manager.RyuApp):
                 sport = udp_pkt.src_port
                 dport = udp_pkt.dst_port
                 if (sport == self.topo_discovery_port) and (dport == self.topo_discovery_port):
+                    match_bcast = parser.OFPMatch(eth_dst=self.broadcast_mac, in_port=in_port)
+                    self.add_flow(datapath, 32000, match_bcast, [], idle_timeout=self.idle_timeout, do_not_display=True)
                     tracer_str = pkt.protocols[-1].replace("'", "\"")
                     tracer_dict = json.loads(tracer_str)
                     topo_dict.setdefault(dpid, {})
